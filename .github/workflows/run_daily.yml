@@ -1,0 +1,42 @@
+name: SEPA股票筛选策略每日运行
+on:
+  # 定时规则：UTC时间每日22:00 = 北京时间次日早上6:00（美股盘后，数据已更新）
+  schedule:
+    - cron: '0 22 * * *'
+  # 保留手动触发功能，方便测试
+  workflow_dispatch:
+
+jobs:
+  run-sepa-strategy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 拉取仓库里的策略代码
+      - name: 拉取策略代码
+        uses: actions/checkout@v4
+
+      # 2. 配置Python环境
+      - name: 配置Python环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. 安装策略所需的所有依赖
+      - name: 安装运行依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install finvizfinance pandas numpy yfinance requests
+
+      # 4. 运行你的SEPA策略脚本
+      - name: 执行股票筛选策略
+        env:
+          # 读取加密存储的Server酱SendKey
+          SERVER_CHAN_SENDKEY: ${{ secrets.SERVER_CHAN_SENDKEY }}
+        run: python 股票筛选bot.py
+
+      # 5. 保存运行日志，方便排查问题
+      - name: 上传运行日志
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 策略运行日志
+          path: ./*.log
