@@ -31,7 +31,7 @@ jobs:
         env:
           # 读取加密存储的Server酱SendKey
           SERVER_CHAN_SENDKEY: ${{ secrets.SERVER_CHAN_SENDKEY }}
-        run: python 股票筛选bot.py
+        run: python sepa_screener_bot.py
 
       # 5. 保存运行日志，方便排查问题
       - name: 上传运行日志
