@@ -1,0 +1,32 @@
+# SEPA 策略配置文件 v1.0
+
+# 初筛核心参数
+filters:
+  market_cap_min: 5000      # 最小市值（百万美元）
+  market_cap_max: 200000    # 最大市值（百万美元）
+  price_min: 5              # 最低股价
+  ma200_rising_days: 43     # MA200持续向上交易日
+  ipo_min_year: 1           # 上市最短年限
+  exclude_industries:       # 排除行业
+    - "Banks"
+    - "Insurance"
+    - "Utilities"
+    - "Oil & Gas"
+    - "Steel"
+    - "Shipping"
+    - "Coal"
+
+# 周期筛选阈值
+thresholds:
+  weekly_bias_limit: 1.4    # 周线乖离率上限
+  daily_bias_limit: 1.5     # 日线乖离率上限
+  daily_rsi_limit: 70       # 日线RSI上限
+
+# 择时与交易控制
+timing:
+  hourly_rsi_overbought: 75
+  hourly_rsi_low: 30
+  hourly_rsi_high: 70
+  max_positions: 3          # 最大推荐位
+  stop_loss_pct: 0.07       # 7% 止损
+  break_even_pct: 0.14      # 14% 保本位
