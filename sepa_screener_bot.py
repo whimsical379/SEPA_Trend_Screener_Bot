@@ -3,6 +3,7 @@
 SEPA 三周期趋势策略自动化筛选
 """
 import os
+import yaml
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -12,28 +13,46 @@ from finvizfinance.screener.overview import Overview
 import warnings
 warnings.filterwarnings('ignore')
 
-# ===================== 全参数配置区 =====================
-# 【初筛核心参数】
-MARKET_CAP_MIN = 5000  # 最小市值（单位：百万美元，默认50亿）
-MARKET_CAP_MAX = 200000  # 最大市值（单位：百万美元，默认2000亿）
-PRICE_MIN = 5  # 最低股价（美元）
-DAILY_VOLUME_MIN = 5  # 单日最低成交量（单位：百万股，默认500万股）
-AVG_VOLUME_MIN = 5  # 20日平均最低成交量（单位：百万股，默认500万股）
-MA200_RISING_DAYS = 43  # MA200持续向上的最小交易日数
-IPO_MIN_YEAR = 1  # 上市最短时间（年）
-EXCLUDE_INDUSTRIES = ["Banks", "Insurance", "Utilities", "Oil & Gas", "Steel", "Shipping", "Coal"]  # 需排除的行业列表
+# ===================== 动态配置加载 =====================
+def load_config(config_path="config.yaml"):
+    """安全加载YAML配置文件"""
+    if not os.path.exists(config_path):
+        print(f"⚠️ 未找到配置文件 {config_path}，请确保文件存在")
+        return None
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-# 【周期筛选阈值】
-WEEKLY_BIAS_LIMIT = 1.4  # 周线乖离率上限：收盘价与周线MA50的最大允许值
-DAILY_BIAS_LIMIT = 1.5  # 日线乖离率上限：收盘价与日线MA200的最大允许值
-DAILY_RSI_LIMIT = 70  # 日线RSI超买上限：14日周期RSI最大值
+# 执行加载
+cfg = load_config()
 
-# 【小时线择时参数】
-HOURLY_RSI_OVERBOUGHT = 75  # 小时线RSI超买阈值
-HOURLY_RSI_LOW = 30  # 小时线低吸区间RSI下限
-HOURLY_RSI_HIGH = 70  # 小时线低吸区间RSI上限
+if cfg:
+    # --- 1. 初筛核心参数 ---
+    MARKET_CAP_MIN = cfg['filters']['market_cap_min']
+    MARKET_CAP_MAX = cfg['filters']['market_cap_max']
+    PRICE_MIN = cfg['filters']['price_min']
+    MA200_RISING_DAYS = cfg['filters']['ma200_rising_days']
+    IPO_MIN_YEAR = cfg['filters']['ipo_min_year']
+    EXCLUDE_INDUSTRIES = cfg['filters']['exclude_industries']
 
-# 【微信推送配置】
+    # --- 2. 周期筛选阈值 ---
+    WEEKLY_BIAS_LIMIT = cfg['thresholds']['weekly_bias_limit']
+    DAILY_BIAS_LIMIT = cfg['thresholds']['daily_bias_limit']
+    DAILY_RSI_LIMIT = cfg['thresholds']['daily_rsi_limit']
+
+    # --- 3. 择时与交易控制 ---
+    HOURLY_RSI_OVERBOUGHT = cfg['timing']['hourly_rsi_overbought']
+    HOURLY_RSI_LOW = cfg['timing']['hourly_rsi_low']
+    HOURLY_RSI_HIGH = cfg['timing']['hourly_rsi_high']
+    MAX_POSITIONS = cfg['timing']['max_positions']
+    STOP_LOSS_PCT = cfg['timing']['stop_loss_pct']
+    BREAK_EVEN_PCT = cfg['timing']['break_even_pct']
+    
+    print("✅ 策略参数已从 config.yaml 成功加载")
+else:
+    # 如果配置加载失败，程序将无法获取必要参数，抛出异常或终止
+    raise FileNotFoundError("无法加载 config.yaml，请检查文件格式及路径")
+
+# 【微信推送配置】保持从环境变量读取，以确保安全性
 SERVER_CHAN_SENDKEY = os.getenv("SERVER_CHAN_SENDKEY", "")
 
 # ===================== 核心固定配置 =====================
