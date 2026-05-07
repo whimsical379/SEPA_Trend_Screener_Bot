@@ -1,4 +1,4 @@
-# SEPA Trend Template Screener Bot (v1.1)
+# SEPA Trend Screener Bot (v1.1)
 
 ## 1. 项目简介
 本项目是一个基于 Python 开发的自动化美股筛选系统，核心逻辑严格遵循传奇交易大师 **Mark Minervini** 的 **SEPA (Specific Entry Point Analysis)** 趋势模板。
