@@ -32,8 +32,20 @@ jobs:
           # 读取加密存储的Server酱SendKey
           SERVER_CHAN_SENDKEY: ${{ secrets.SERVER_CHAN_SENDKEY }}
         run: python sepa_screener_bot.py
+        
+# 5. 将生成的 CSV 数据自动提交回 GitHub 仓库
+      - name: 自动更新历史数据库
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
+          # 检查是否有文件变动（防止没有选到股票时报错）
+          if [ -f sepa_history_signals.csv ]; then
+            git add sepa_history_signals.csv
+            git commit -m "🤖 自动更新SEPA历史信号 [$(date +'%Y-%m-%d')]" || echo "无变动需提交"
+            git push
+          fi
 
-      # 5. 保存运行日志，方便排查问题
+      # 6. 保存运行日志
       - name: 上传运行日志
         uses: actions/upload-artifact@v4
         if: always()
