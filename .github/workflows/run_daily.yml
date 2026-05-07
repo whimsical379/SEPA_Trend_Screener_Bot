@@ -20,11 +20,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 3. 安装策略所需的所有依赖
+     # 3. 安装策略所需的所有依赖
       - name: 安装运行依赖
         run: |
           python -m pip install --upgrade pip
-          pip install finvizfinance pandas numpy yfinance requests
+          pip install -r requirements.txt
 
       # 4. 运行你的SEPA策略脚本
       - name: 执行股票筛选策略
