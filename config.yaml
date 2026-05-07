@@ -1,4 +1,4 @@
-# SEPA 策略配置文件 v1.0
+# SEPA 策略配置文件 
 
 # 初筛核心参数
 filters:
@@ -30,3 +30,15 @@ timing:
   max_positions: 3          # 最大推荐位
   stop_loss_pct: 0.07       # 7% 止损
   break_even_pct: 0.14      # 14% 保本位
+  # ... 前面内容保持不变 ...
+
+# 择时与交易控制
+timing:
+  hourly_rsi_overbought: 75
+  hourly_rsi_low: 30
+  hourly_rsi_high: 70
+  max_positions: 3          # 最大推荐位
+  stop_loss_pct: 0.07       # 7% 止损
+  break_even_pct: 0.14      # 14% 保本位
+  benchmark: "SPY"          # 参照指数
+  vol_mult: 1.0             # 成交量放大倍数
