@@ -1,1 +1,11 @@
+# 基础数据处理
+pandas
+numpy
+
+# 股票数据抓取与筛选
+yfinance
+finvizfinance
+
+# 网络请求与推送
+requests
 
