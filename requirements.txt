@@ -8,4 +8,5 @@ finvizfinance
 
 # 网络请求与推送
 requests
-
+# 参数配置用库
+PyYAML
