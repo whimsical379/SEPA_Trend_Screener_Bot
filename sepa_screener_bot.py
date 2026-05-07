@@ -275,6 +275,19 @@ def run_sepa_bot():
             push_content += f"- 周期验证：{i['Msg']}\n"
             push_content += f"- 择时建议：{i['Timing']}\n\n"
 
+    if buy_signals:
+        # 将结果转换为 DataFrame
+        df_to_save = pd.DataFrame(buy_signals[:MAX_POSITIONS])
+        # 增加记录时间列
+        df_to_save['Date'] = datetime.now(tz_utc_8).strftime('%Y-%m-%d')
+        
+        # 2. 保存到 CSV 文件（以追加模式写入）
+        csv_file = 'sepa_history_signals.csv'
+        # 如果文件不存在，则写入表头；如果存在，则只追加数据
+        header = not os.path.exists(csv_file)
+        df_to_save.to_csv(csv_file, mode='a', index=False, header=header, encoding='utf-8-sig')
+        print(f"💾 已将 {len(df_to_save)} 条信号保存至 {csv_file}")
+
     # 最终发送微信推送
     send_wechat_msg(push_content)
 
