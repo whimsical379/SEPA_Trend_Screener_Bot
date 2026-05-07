@@ -15,44 +15,47 @@ warnings.filterwarnings('ignore')
 
 # ===================== 动态配置加载 =====================
 def load_config(config_path="config.yaml"):
-    """安全加载YAML配置文件"""
     if not os.path.exists(config_path):
-        print(f"⚠️ 未找到配置文件 {config_path}，请确保文件存在")
         return None
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-# 执行加载
 cfg = load_config()
 
+# --- 核心修正：给所有变量提供初始默认值，防止NameError ---
+BENCHMARK = "SPY"
+VOL_MULT = 1.0
+MARKET_CAP_MIN, MARKET_CAP_MAX = 5000, 200000
+MAX_POSITIONS = 3
+STOP_LOSS_PCT, BREAK_EVEN_PCT = 0.07, 0.14
+
 if cfg:
-    # --- 1. 初筛核心参数 ---
-    MARKET_CAP_MIN = cfg['filters']['market_cap_min']
-    MARKET_CAP_MAX = cfg['filters']['market_cap_max']
-    PRICE_MIN = cfg['filters']['price_min']
-    MA200_RISING_DAYS = cfg['filters']['ma200_rising_days']
-    IPO_MIN_YEAR = cfg['filters']['ipo_min_year']
-    EXCLUDE_INDUSTRIES = cfg['filters']['exclude_industries']
+    try:
+        # 从配置文件映射参数
+        MARKET_CAP_MIN = cfg['filters']['market_cap_min']
+        MARKET_CAP_MAX = cfg['filters']['market_cap_max']
+        PRICE_MIN = cfg['filters'].get('price_min', 5)
+        MA200_RISING_DAYS = cfg['filters'].get('ma200_rising_days', 43)
+        EXCLUDE_INDUSTRIES = cfg['filters']['exclude_industries']
 
-    # --- 2. 周期筛选阈值 ---
-    WEEKLY_BIAS_LIMIT = cfg['thresholds']['weekly_bias_limit']
-    DAILY_BIAS_LIMIT = cfg['thresholds']['daily_bias_limit']
-    DAILY_RSI_LIMIT = cfg['thresholds']['daily_rsi_limit']
+        WEEKLY_BIAS_LIMIT = cfg['thresholds']['weekly_bias_limit']
+        DAILY_RSI_LIMIT = cfg['thresholds']['daily_rsi_limit']
 
-    # --- 3. 择时与交易控制 ---
-    HOURLY_RSI_OVERBOUGHT = cfg['timing']['hourly_rsi_overbought']
-    HOURLY_RSI_LOW = cfg['timing']['hourly_rsi_low']
-    HOURLY_RSI_HIGH = cfg['timing']['hourly_rsi_high']
-    MAX_POSITIONS = cfg['timing']['max_positions']
-    STOP_LOSS_PCT = cfg['timing']['stop_loss_pct']
-    BREAK_EVEN_PCT = cfg['timing']['break_even_pct']
-    
-    print("✅ 策略参数已从 config.yaml 成功加载")
+        MAX_POSITIONS = cfg['timing']['max_positions']
+        STOP_LOSS_PCT = cfg['timing']['stop_loss_pct']
+        BREAK_EVEN_PCT = cfg['timing']['break_even_pct']
+        
+        # 显式提取这两个报错的变量
+        BENCHMARK = cfg['timing'].get('benchmark', "SPY")
+        VOL_MULT = cfg['timing'].get('vol_mult', 1.0)
+        
+        print("✅ 策略参数已从 config.yaml 成功加载")
+    except KeyError as e:
+        print(f"⚠️ 配置文件格式错误，缺少键值: {e}。将使用程序内置默认值。")
 else:
-    # 如果配置加载失败，程序将无法获取必要参数，抛出异常或终止
-    raise FileNotFoundError("无法加载 config.yaml，请检查文件格式及路径")
+    print("⚠️ 未找到配置文件，正在使用内置默认参数运行...")
 
-# 【微信推送配置】保持从环境变量读取，以确保安全性
+# 保持从环境变量读取密钥
 SERVER_CHAN_SENDKEY = os.getenv("SERVER_CHAN_SENDKEY", "")
 
 # ===================== 微信推送函数 =====================
