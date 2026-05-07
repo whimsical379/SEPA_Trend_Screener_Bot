@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from finvizfinance.screener.overview import Overview
 import warnings
 warnings.filterwarnings('ignore')
@@ -209,8 +209,8 @@ def get_hourly_timing(ticker):
 
 # ===================== 主运行函数 =====================
 def run_sepa_bot():
-    """全自动化运行+微信推送主流程"""
-    run_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tz_utc_8 = timezone(timedelta(hours=8))
+    run_time = datetime.now(tz_utc_8).strftime('%Y-%m-%d %H:%M:%S')
     print(f"===== SEPA策略运行时间：{run_time} =====")
     
     # 初始化推送内容
