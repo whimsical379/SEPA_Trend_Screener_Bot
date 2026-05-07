@@ -55,11 +55,6 @@ else:
 # 【微信推送配置】保持从环境变量读取，以确保安全性
 SERVER_CHAN_SENDKEY = os.getenv("SERVER_CHAN_SENDKEY", "")
 
-# ===================== 核心固定配置 =====================
-BENCHMARK, MAX_POSITIONS = "SPY", 3
-STOP_LOSS_PCT, BREAK_EVEN_PCT = 0.07, 0.14
-VOL_MULT = 1.0
-
 # ===================== 微信推送函数 =====================
 def send_wechat_msg(content):
     """Server酱微信推送函数，传入推送内容，自动发送到微信"""
