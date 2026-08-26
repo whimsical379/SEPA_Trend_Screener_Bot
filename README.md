@@ -1,7 +1,26 @@
-# SEPA Trend Screener Bot (v1.2)
+# SEPA Trend Screener Bot (v1.3)
 
 ## 1. 项目简介
 本项目是一个基于 Python 开发的自动化美股筛选系统，核心逻辑严格遵循传奇交易大师 **Mark Minervini** 的 **SEPA (Specific Entry Point Analysis)** 趋势模板。
+
+### v1.3 更新内容 (2026-08-26)
+
+**Bug 修复：**
+* **修复初筛 Ticker 解析错误（候选标的骤减的根因）**：finviz.com 2026 年改版后，ticker 单元格内新增了 logo 首字母占位 `<span>`，`finvizfinance` 库解析时用 `get_text()` 拼接导致 Ticker 变成重复首字母（如 `AAOI` → `AAAOI`，对应上游 issue #158），这些非法代码在 yfinance 查询全部失败。已加入兼容补丁，从链接 `href="stock?t=XXX"` 提取真实代码。
+* **修复市值二次校验被 yfinance 限流静默吞掉**：原逻辑逐只调用 `yf.Ticker().fast_info`，Yahoo 对脚本/IP 限流（`YFRateLimitError: Too Many Requests`）时被 `except: continue` 静默丢弃，导致初筛结果骤减甚至归零。
+
+**功能优化：**
+* **市值过滤改用 finviz 自带 `Market Cap` 列**：不再逐只请求 yfinance，既规避限流又大幅提速（初筛从逐只网络请求变为单次 DataFrame 过滤）。
+* **初筛流程增加三层排查打点**：`环节① finviz 原始返回 → 环节② 行业排除 → 环节③ 市值过滤`，每步打印数量，数量异常时一眼定位缩水环节。
+* **新增 `diagnose_screener.py` 独立诊断脚本**：一键复检 finvizfinance 版本、过滤选项、筛选返回数量、yfinance 可用性，方便后续排查。
+* **`requirements.txt` 锁定依赖版本**：固定为本地实测验证的组合（`finvizfinance==1.3.0` 等），避免 GitHub Actions 每次安装最新版引入行为漂移。
+
+**本地实测结果（2026-08-26）：**
+```
+环节① finviz 原始返回:  285 只
+环节② 行业排除后:       228 只
+环节③ 市值过滤后:       187 只   （Ticker 全部正常，无重复首字母）
+```
 
 ### v1.2 更新内容 (2026-07-08)
 
@@ -66,7 +85,7 @@
 ## 4. 自动化流程 (CI/CD Workflow)
 本项目利用 GitHub Actions 实现全自动化运行闭环：
 1. **定时触发**：每日北京时间 06:00 自动启动。
-2. **环境构建**：基于 `requirements.txt` 自动安装最新依赖。
+2. **环境构建**：基于 `requirements.txt` 自动安装锁定版本的依赖。
 3. **策略执行**：加载 `config.yaml` 参数，执行两周期扫描 + "差一步"追踪。
 4. **数据回写**：筛选结果自动追加至 `sepa_history_signals.csv` 并自动提交（Commit）回仓库。
 5. **即时推送**：通过 Server 酱发送微信通知（含完整入选 + 差一步标的）。
@@ -84,15 +103,17 @@ cd SEPA_Trend_Screener_Bot
 ```
 
 **步骤 2：替换文件**
-将修改后的三个文件覆盖到仓库目录：
+将修改后的文件覆盖到仓库目录：
 - `sepa_screener_bot.py`
+- `diagnose_screener.py`（v1.3 新增）
+- `requirements.txt`（v1.3 已锁定版本）
 - `config.yaml`
 - `README.md`
 
 **步骤 3：提交并推送**
 ```bash
-git add sepa_screener_bot.py config.yaml README.md
-git commit -m "v1.2: 修复运行时bug, 优化筛选逻辑, 新增near-miss追踪"
+git add sepa_screener_bot.py diagnose_screener.py requirements.txt config.yaml README.md
+git commit -m "v1.3: 修复finviz改版导致的ticker解析bug, 市值过滤改用finviz列规避yfinance限流"
 git push origin main
 ```
 
@@ -140,11 +161,12 @@ jobs:
 * 首次测试建议用 `workflow_dispatch` 手动触发，不要等定时任务。
 * 如果出现 `finvizfinance` 连接超时，是网络问题，重试即可。
 * 推送内容过长被微信截断是正常的（Server 酱单条限制约 5KB），near-miss 已限制展示 15 只。
-* `requirements.txt` 无变化，v1.2 无新增依赖。
+* 初筛数量异常骤减时，查看日志中的三层排查打点（环节①/②/③），或本地运行 `python diagnose_screener.py` 复检。
+* `requirements.txt` 已在 v1.3 锁定依赖版本；上游 `finvizfinance` 修复 issue #158 后建议先本地验证再升级。
 
 ## 6. 免责声明 (Disclaimer)
 * 本项目仅作为个人量化研究工具，不构成任何投资建议。
 * 金融投资有风险，脚本筛选结果仅供技术参考，请务必独立决策。
 
 ---
-**Last Updated**: 2026-07-08
+**Last Updated**: 2026-08-26
