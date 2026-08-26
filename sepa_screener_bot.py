@@ -13,6 +13,50 @@ from finvizfinance.screener.overview import Overview
 import warnings
 warnings.filterwarnings('ignore')
 
+# ===================== finvizfinance 兼容补丁 =====================
+# 修复 finviz.com 2026 年改版引发的 Ticker 重复首字母 bug（finvizfinance issue #158）
+# 新版页面在 ticker 单元格内新增了 logo 首字母 <span>（图片加载失败时的字母回退），
+# 库用 col.get_text() 会把 "A" + "AAOI" 拼成 "AAAOI"，导致后续 yfinance 查询全部失败。
+# 补丁：Ticker 列优先从 <a class="tab-link"> 的 href="stock?t=XXX" 提取真实代码。
+def _install_finviz_ticker_patch():
+    import re as _re
+    from finvizfinance.screener import base as _base
+    from finvizfinance.util import number_covert as _nc
+
+    def _patched_get_table(self, rows, df, num_col_index, table_header, limit=-1):
+        rows = rows[1:]
+        if limit != -1:
+            rows = rows[0:limit]
+        frame = []
+        for row in rows:
+            cols = row.findAll("td")[1:]
+            info_dict = {}
+            for i, col in enumerate(cols):
+                header = table_header[i] if i < len(table_header) else f"col{i}"
+                if header == "Ticker":
+                    # 修复: 从 href="stock?t=XXX" 提取真实 ticker
+                    a = col.find("a", class_="tab-link") or col.find("a")
+                    if a and a.get("href"):
+                        m = _re.search(r"[?&]t=([^&]+)", a["href"])
+                        if m:
+                            info_dict[header] = m.group(1)
+                            continue
+                    info_dict[header] = col.get_text(strip=True)
+                elif i not in num_col_index:
+                    info_dict[header] = col.text
+                else:
+                    info_dict[header] = _nc(col.text)
+            frame.append(info_dict)
+        if len(df) == 0:
+            return pd.DataFrame(frame)
+        return pd.concat([df, pd.DataFrame(frame)], ignore_index=True)
+
+    _base.Base._get_table = _patched_get_table
+
+
+_install_finviz_ticker_patch()
+
+
 # ===================== 动态配置加载 =====================
 def load_config(config_path="config.yaml"):
     if not os.path.exists(config_path):
@@ -90,30 +134,51 @@ def get_finviz_screened_tickers():
         f_screener.set_filter(filters_dict=filters_dict)
         df_res = f_screener.screener_view()
 
+        # [排查打点] 环节①：finviz 原始返回
         if df_res is None or df_res.empty:
+            print("❌[排查] 环节① finviz 返回空/None: df_res =", df_res)
             return []
+        print(f"🔍[排查] 环节① finviz 原始返回: {len(df_res)} 只 | 列名: {list(df_res.columns)}")
 
         if 'Industry' in df_res.columns:
             exclude_pattern = '|'.join(EXCLUDE_INDUSTRIES)
             df_res = df_res[~df_res['Industry'].str.contains(exclude_pattern, case=False, na=False)]
 
+        # [排查打点] 环节②：行业排除后
+        print(f"🔍[排查] 环节② 行业排除后: {len(df_res)} 只")
+
         initial_tickers = df_res['Ticker'].tolist()
+
+        # ===== 市值二次过滤 =====
+        # 修复: 原逻辑用 yfinance 逐只 fast_info 校验，但 Yahoo 对脚本/IP 限流严重
+        # (YFRateLimitError: Too Many Requests)，导致候选标的被 except 静默丢弃而骤减。
+        # finviz screener 本身返回 Market Cap 列（float64，美元），直接用该列过滤即可，
+        # 既规避限流又大幅提速。
         final_tickers = []
-
-        print(f"🔍 正在进行市值二次校验 (目标范围: {MARKET_CAP_MIN}M - {MARKET_CAP_MAX}M)...")
-        for ticker in initial_tickers:
-            try:
-                info = yf.Ticker(ticker).fast_info
-                mkt_cap_m = info['marketCap'] / 1e6
-                if MARKET_CAP_MIN <= mkt_cap_m <= MARKET_CAP_MAX:
-                    final_tickers.append(ticker)
-            except Exception:
-                continue
-
-        print(f"✅ finviz初筛完成，最终获取到 {len(final_tickers)} 只符合条件的标的")
+        if 'Market Cap' in df_res.columns:
+            mc_m = df_res['Market Cap'] / 1e6  # 转成百万美元
+            before = len(df_res)
+            df_res = df_res[(mc_m >= MARKET_CAP_MIN) & (mc_m <= MARKET_CAP_MAX)]
+            final_tickers = df_res['Ticker'].tolist()
+            print(f"🔍[排查] 环节③ 市值过滤(finviz Market Cap列): {before} → {len(final_tickers)} 只 "
+                  f"(范围 {MARKET_CAP_MIN}-{MARKET_CAP_MAX}M)")
+        else:
+            # 兜底: finviz 结果无 Market Cap 列时回退到 yfinance 校验（注意可能被限流）
+            print(f"⚠️ finviz 结果缺少 Market Cap 列，回退 yfinance 校验 (目标: {MARKET_CAP_MIN}-{MARKET_CAP_MAX}M)...")
+            skipped = 0
+            for ticker in initial_tickers:
+                try:
+                    info = yf.Ticker(ticker).fast_info
+                    mkt_cap_m = info['marketCap'] / 1e6
+                    if MARKET_CAP_MIN <= mkt_cap_m <= MARKET_CAP_MAX:
+                        final_tickers.append(ticker)
+                except Exception as e:
+                    skipped += 1
+                    print(f"⚠️[排查] {ticker} 市值校验失败: {type(e).__name__}: {e}")
+            print(f"🔍[排查] 环节③ 市值二次校验后: {len(final_tickers)} 只 (失败/跳过 {skipped} 只)")
         return final_tickers
     except Exception as e:
-        print(f"❌ finviz初筛接口调用失败: {e}")
+        print(f"❌ finviz初筛接口调用失败: {type(e).__name__}: {e}")
         return []
 
 # ===================== 数据获取 =====================
