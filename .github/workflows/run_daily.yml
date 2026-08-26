@@ -18,7 +18,7 @@ jobs:
       - name: 配置Python环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
      # 3. 安装策略所需的所有依赖
       - name: 安装运行依赖
