@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.header import Header
+from email.utils import formataddr
 from finvizfinance.screener.overview import Overview
 import warnings
 warnings.filterwarnings('ignore')
@@ -141,8 +142,9 @@ def send_email_msg(title, content):
         print("⚠️ 未配置SMTP参数(SMTP_USER/SMTP_PASS/SMTP_TO)，跳过邮件推送")
         return False
     msg = MIMEText(content, "plain", "utf-8")
-    msg["From"] = Header(f"SEPA Bot <{SMTP_USER}>", "utf-8")
-    msg["To"] = Header(",".join(to_list), "utf-8")
+    # 注意: From/To 必须保持明文邮箱地址（勿用 Header 编码，否则 QQ 邮箱 550 拒收）
+    msg["From"] = formataddr(("SEPA Bot", SMTP_USER))
+    msg["To"] = ", ".join(to_list)
     msg["Subject"] = Header(title, "utf-8")
     try:
         server = smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30)
