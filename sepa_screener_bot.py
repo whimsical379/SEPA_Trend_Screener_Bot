@@ -3,12 +3,16 @@
 SEPA 趋势策略自动化筛选（周线闸门 + 日线核心 + 差一步标的追踪）
 """
 import os
+import smtplib
 import yaml
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from email.mime.text import MIMEText
+from email.header import Header
 from finvizfinance.screener.overview import Overview
 import warnings
 warnings.filterwarnings('ignore')
@@ -96,27 +100,71 @@ if cfg:
 else:
     print("⚠️ 未找到配置文件，正在使用内置默认参数运行...")
 
-SERVER_CHAN_SENDKEY = os.getenv("SERVER_CHAN_SENDKEY", "")
+# ===================== SMTP 邮件推送配置 =====================
+SMTP_USER = os.getenv("SMTP_USER", "")   # QQ邮箱地址
+SMTP_PASS = os.getenv("SMTP_PASS", "")   # QQ邮箱授权码（非登录密码）
+SMTP_TO   = os.getenv("SMTP_TO", "")     # 收件人邮箱，多个用逗号分隔
 
-# ===================== 微信推送函数 =====================
-def send_wechat_msg(content):
-    """Server酱微信推送函数"""
-    if not SERVER_CHAN_SENDKEY:
-        print("⚠️ 未配置Server酱SendKey，跳过微信推送")
-        return False
-    url = f"https://sctapi.ftqq.com/{SERVER_CHAN_SENDKEY}.send"
-    data = {"title": "🔴 SEPA策略每日运行结果", "desp": content}
-    try:
-        response = requests.post(url, data=data)
-        if response.status_code == 200:
-            print("✅ 微信推送发送成功")
-            return True
+# ===================== 邮件推送函数 =====================
+def md_to_plain(md_text):
+    """简单 Markdown → 纯文本（适配邮件正文）"""
+    lines = []
+    for raw in md_text.splitlines():
+        s = raw.strip()
+        if not s:
+            lines.append("")
+        elif s.startswith("####"):
+            lines.append("\n[ " + s.lstrip("#").strip() + " ]")
+            lines.append("-" * 40)
+        elif s.startswith("###"):
+            lines.append("\n" + s.lstrip("#").strip().upper())
+            lines.append("=" * 40)
+        elif s.startswith("##"):
+            lines.append("\n" + s.lstrip("#").strip())
+            lines.append("=" * 40)
+        elif s.startswith("|"):
+            cells = [c.strip() for c in s.split("|") if c.strip()]
+            if all(set(c) <= set(":-") for c in cells):  # 表格分隔行
+                continue
+            lines.append("  " + " | ".join(cells))
+        elif s.startswith("- ") or s.startswith("* "):
+            lines.append("  • " + s[2:])
         else:
-            print(f"❌ 微信推送发送失败，状态码：{response.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ 微信推送出错：{e}")
+            lines.append(s)
+    return "\n".join(lines)
+
+
+def send_email_msg(title, content):
+    """SMTP 邮件推送（QQ邮箱，支持多收件人）"""
+    to_list = [x.strip() for x in SMTP_TO.split(",") if x.strip()]
+    if not (SMTP_USER and SMTP_PASS and to_list):
+        print("⚠️ 未配置SMTP参数(SMTP_USER/SMTP_PASS/SMTP_TO)，跳过邮件推送")
         return False
+    msg = MIMEText(content, "plain", "utf-8")
+    msg["From"] = Header(f"SEPA Bot <{SMTP_USER}>", "utf-8")
+    msg["To"] = Header(",".join(to_list), "utf-8")
+    msg["Subject"] = Header(title, "utf-8")
+    try:
+        server = smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30)
+        server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(SMTP_USER, to_list, msg.as_string())
+        server.quit()
+        print("✅ 邮件推送发送成功 →", to_list)
+        return True
+    except Exception as e:
+        print(f"❌ 邮件推送出错: {type(e).__name__}: {e}")
+        return False
+
+# ===================== 交易日判断 =====================
+def is_us_trading_day():
+    """判断美东当前日期是否为美股交易日（XNYS 纽交所日历）"""
+    try:
+        import exchange_calendars as xcals
+        xnys = xcals.get_calendar("XNYS")
+        return xnys.is_session(datetime.now(ZoneInfo("America/New_York")).date())
+    except Exception as e:
+        print(f"⚠️ 交易日历加载失败({type(e).__name__}: {e})，默认视为交易日")
+        return True
 
 # ===================== 初筛函数 =====================
 def get_finviz_screened_tickers():
@@ -183,7 +231,7 @@ def get_finviz_screened_tickers():
 
 # ===================== 数据获取 =====================
 def get_data(symbol: str, interval='1d'):
-    """获取K线数据"""
+    """获取单只K线数据（用于基准指数与批量下载失败回退）"""
     period = "2y" if interval == '1wk' else "1y"
     df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
     if df.empty:
@@ -191,6 +239,43 @@ def get_data(symbol: str, interval='1d'):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
+
+
+def download_batch(tickers, interval='1d', batch_size=50):
+    """批量下载K线，返回 {ticker: DataFrame}
+
+    按 batch_size 分批请求（yfinance 内部再细分为小批），请求数从 ~N 次降到 ~N/batch_size 次，
+    显著降低被 Yahoo 限流的概率。批请求失败时自动回退为单只下载，保证数据完整性。
+    """
+    if not tickers:
+        return {}
+    period = "2y" if interval == '1wk' else "1y"
+    result = {}
+    n_batch = (len(tickers) + batch_size - 1) // batch_size
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
+        idx = i // batch_size + 1
+        try:
+            df = yf.download(batch, period=period, interval=interval,
+                             group_by='ticker', batch_size=batch_size,
+                             progress=False, auto_adjust=True, threads=True)
+            if df is None or df.empty:
+                print(f"⚠️[批量下载] 第{idx}/{n_batch}批({len(batch)}只)返回为空，跳过")
+                continue
+            for tk in batch:
+                try:
+                    sub = df[tk].dropna()  # 去掉批量对齐产生的缺失行
+                    if not sub.empty:
+                        result[tk] = sub
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"⚠️[批量下载] 第{idx}/{n_batch}批失败({type(e).__name__}: {e})，回退单只下载")
+            for tk in batch:
+                sub = get_data(tk, interval=interval)
+                if sub is not None and not sub.empty:
+                    result[tk] = sub
+    return result
 
 # ===================== 周线闸门（返回逐条件失败明细） =====================
 def check_weekly_gate(ticker, df_w):
@@ -299,25 +384,46 @@ def run_sepa_bot():
     run_time = datetime.now(tz_utc_8).strftime('%Y-%m-%d %H:%M:%S')
     print(f"===== SEPA策略运行时间：{run_time} =====")
 
+    # ===== 非交易日跳过 =====
+    if not is_us_trading_day():
+        msg = (f"## SEPA策略今日休市\n\n"
+               f"- 运行时间：{run_time}（北京时间）\n"
+               f"- 原因：美股今日非交易日\n"
+               f"- 结果：今日不进行筛选，明日自动恢复正常运行。")
+        print(msg)
+        send_email_msg("📭 SEPA策略：今日美股休市", md_to_plain(msg))
+        return
+
     push_content = f"## SEPA策略运行时间：{run_time}\n\n"
     tickers = get_finviz_screened_tickers()
 
     if not tickers:
         push_content += "❌ finviz初筛无符合条件的标的，请检查参数"
         print(push_content)
-        send_wechat_msg(push_content)
+        send_email_msg("🔴 SEPA策略每日运行结果", md_to_plain(push_content))
         return
 
     push_content += f"✅ finviz初筛完成，共获取到 {len(tickers)} 只候选标的\n\n"
-    spy_df = get_data(BENCHMARK)
     buy_signals = []
     near_misses = []  # 差一个条件就能入选
+
+    # ===== 批量下载（周线/日线各一次，替代逐只请求）=====
+    print("📥 批量下载周线数据（2y）...")
+    weekly_data = download_batch(tickers, interval='1wk')
+    print(f"✅ 周线数据就绪：{len(weekly_data)}/{len(tickers)} 只")
+    print("📥 批量下载日线数据（1y）...")
+    daily_data = download_batch(tickers, interval='1d')
+    print(f"✅ 日线数据就绪：{len(daily_data)}/{len(tickers)} 只")
+    spy_df = get_data(BENCHMARK)  # 基准指数单独下载
 
     # 循环筛选
     for ticker in tickers:
         try:
             # 周线闸门（逐条件追踪）
-            df_w = get_data(ticker, interval='1wk')
+            df_w = weekly_data.get(ticker)
+            if df_w is None:
+                print(f"[跳过] {ticker}: 周线数据缺失")
+                continue
             pass_w, msg_w, failed_w = check_weekly_gate(ticker, df_w)
             if not pass_w:
                 if len(failed_w) == 1:
@@ -325,7 +431,10 @@ def run_sepa_bot():
                 continue
 
             # 日线核心（逐条件追踪）
-            df_d = get_data(ticker, interval='1d')
+            df_d = daily_data.get(ticker)
+            if df_d is None:
+                print(f"[跳过] {ticker}: 日线数据缺失")
+                continue
             pass_d, msg_d, last_row, failed_d = check_daily_core(ticker, df_d, spy_df)
             if not pass_d:
                 if len(failed_d) == 1:
@@ -393,7 +502,7 @@ def run_sepa_bot():
         print(f"💾 已将 {len(df_to_save)} 条信号保存至 {csv_file}")
 
     # 最终推送
-    send_wechat_msg(push_content)
+    send_email_msg("🔴 SEPA策略每日运行结果", md_to_plain(push_content))
 
 if __name__ == '__main__':
     run_sepa_bot()

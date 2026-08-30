@@ -1,7 +1,21 @@
-# SEPA Trend Screener Bot (v1.3)
+# SEPA Trend Screener Bot (v1.4)
 
 ## 1. 项目简介
 本项目是一个基于 Python 开发的自动化美股筛选系统，核心逻辑严格遵循传奇交易大师 **Mark Minervini** 的 **SEPA (Specific Entry Point Analysis)** 趋势模板。
+
+### v1.4 更新内容 (2026-08-30)
+
+**性能优化：**
+* **yfinance 批量下载**：新增 `download_batch()`，按 50 只分批批量下载周线/日线数据（`group_by='ticker'`），HTTP 请求次数从 ~400 次降到 ~8 次，显著降低被 Yahoo 限流的概率并大幅缩短运行时间；单批失败自动回退为单只下载，保证数据完整性。
+
+**推送升级：**
+* **Server 酱微信推送 → SMTP 邮件推送**：改用 QQ 邮箱 SMTP（`smtplib` 标准库），正文不再受 5KB 限制，支持**多收件人**共享，发送后 QQ 邮箱自动存档。
+* 新增 `md_to_plain()` 将 Markdown 推送内容转为对齐的纯文本格式，邮件正文更易读。
+* GitHub Secrets 变更：删除 `SERVER_CHAN_SENDKEY`，新增 `SMTP_USER` / `SMTP_PASS`（QQ 邮箱授权码）/ `SMTP_TO`（收件人，可逗号分隔多个）。
+
+**新增功能：**
+* **非交易日跳过运行**：用 `exchange_calendars` 的 XNYS（纽交所）日历判断美东当天是否为交易日，周末及美股节假日（感恩节、圣诞节等）自动跳过筛选，并推送一条"今日休市"通知，避免空跑浪费资源。
+* `requirements.txt` 新增依赖 `exchange_calendars`。
 
 ### v1.3 更新内容 (2026-08-26)
 
@@ -141,26 +155,30 @@ jobs:
 
 **步骤 5：配置 GitHub Secrets**
 1. 进入仓库 **Settings → Secrets and variables → Actions**
-2. 点击 **New repository secret**
-3. Name: `SERVER_CHAN_SENDKEY`，Value: 你的 Server 酱 SendKey
+2. 点击 **New repository secret**，依次新增三个：
+   - Name: `SMTP_USER`，Value: 你的 QQ 邮箱地址
+   - Name: `SMTP_PASS`，Value: 你的 QQ 邮箱**授权码**（QQ 邮箱 → 设置 → 账户 → 开启 SMTP 服务后生成，不是登录密码）
+   - Name: `SMTP_TO`，Value: 收件人邮箱（支持多个，用英文逗号分隔）
+3. （可选）删除旧的 `SERVER_CHAN_SENDKEY`
 4. 进入 **Settings → Actions → General**，将 **Workflow permissions** 改为 **Read and write permissions**
 
 **步骤 6：手动触发测试**
 1. 进入仓库 **Actions** 标签页
-2. 左侧选择 **SEPA Daily Screener**
+2. 左侧选择 **SEPA股票筛选策略每日运行**
 3. 点击 **Run workflow** → **Run workflow**
-4. 等待运行完成，检查日志和微信推送结果
+4. 等待运行完成，检查日志和邮件推送结果
 
 ### 5.2 关键调试说明
 * 首次测试建议用 `workflow_dispatch` 手动触发，不要等定时任务。
 * 如果出现 `finvizfinance` 连接超时，是网络问题，重试即可。
-* 推送内容过长被微信截断是正常的（Server 酱单条限制约 5KB），near-miss 已限制展示 15 只。
+* 邮件正文已无 5KB 长度限制；near-miss 仍限制展示 15 只避免内容过长。
 * 初筛数量异常骤减时，查看日志中的三层排查打点（环节①/②/③），或本地运行 `python diagnose_screener.py` 复检。
-* `requirements.txt` 已在 v1.3 锁定依赖版本；上游 `finvizfinance` 修复 issue #158 后建议先本地验证再升级。
+* `requirements.txt` 已在 v1.3 锁定核心依赖版本（v1.4 新增 `exchange_calendars`）；上游 `finvizfinance` 修复 issue #158 后建议先本地验证再升级。
+* 美股休市日（周末/节假日）不会运行筛选，会收到一条"今日休市"通知邮件。
 
 ## 6. 免责声明 (Disclaimer)
 * 本项目仅作为个人量化研究工具，不构成任何投资建议。
 * 金融投资有风险，脚本筛选结果仅供技术参考，请务必独立决策。
 
 ---
-**Last Updated**: 2026-08-26
+**Last Updated**: 2026-08-30
