@@ -29,8 +29,10 @@ jobs:
       # 4. 运行你的SEPA策略脚本
       - name: 执行股票筛选策略
         env:
-          # 读取加密存储的Server酱SendKey
-          SERVER_CHAN_SENDKEY: ${{ secrets.SERVER_CHAN_SENDKEY }}
+          # SMTP 邮件推送配置（QQ邮箱授权码等）
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
         run: python sepa_screener_bot.py
         
 # 5. 将生成的 CSV 数据自动提交回 GitHub 仓库
