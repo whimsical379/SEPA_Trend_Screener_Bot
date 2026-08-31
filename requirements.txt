@@ -7,6 +7,7 @@ numpy==2.5.2
 # 股票数据抓取与筛选
 yfinance==1.6.0
 finvizfinance==1.3.0
+akshare>=1.14.0  # A股数据源
 
 # 交易日历（美股交易日判断）
 exchange_calendars==4.13.2
