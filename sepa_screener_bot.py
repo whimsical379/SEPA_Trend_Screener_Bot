@@ -82,7 +82,7 @@ if cfg:
     try:
         MARKET_CAP_MIN = cfg['filters']['market_cap_min']
         MARKET_CAP_MAX = cfg['filters']['market_cap_max']
-        EXCLUDE_INDUSTRIES = cfg['filters']['exclude_industries']
+        EXCLUDE_INDUSTRIES = cfg['filters'].get('exclude_industries', [])
 
         WEEKLY_BIAS_LIMIT = cfg['thresholds']['weekly_bias_limit']
         DAILY_BIAS_LIMIT = cfg['thresholds']['daily_bias_limit']
@@ -170,7 +170,7 @@ def is_us_trading_day():
 
 # ===================== 初筛函数 =====================
 def get_finviz_screened_tickers():
-    """finviz自动初筛 + 行业排除 + 市值二次校验"""
+    """finviz自动初筛 + 市值二次校验"""
     try:
         f_screener = Overview()
         filters_dict = {
@@ -190,13 +190,6 @@ def get_finviz_screened_tickers():
             return []
         print(f"🔍[排查] 环节① finviz 原始返回: {len(df_res)} 只 | 列名: {list(df_res.columns)}")
 
-        if 'Industry' in df_res.columns:
-            exclude_pattern = '|'.join(EXCLUDE_INDUSTRIES)
-            df_res = df_res[~df_res['Industry'].str.contains(exclude_pattern, case=False, na=False)]
-
-        # [排查打点] 环节②：行业排除后
-        print(f"🔍[排查] 环节② 行业排除后: {len(df_res)} 只")
-
         initial_tickers = df_res['Ticker'].tolist()
 
         # ===== 市值二次过滤 =====
@@ -210,7 +203,7 @@ def get_finviz_screened_tickers():
             before = len(df_res)
             df_res = df_res[(mc_m >= MARKET_CAP_MIN) & (mc_m <= MARKET_CAP_MAX)]
             final_tickers = df_res['Ticker'].tolist()
-            print(f"🔍[排查] 环节③ 市值过滤(finviz Market Cap列): {before} → {len(final_tickers)} 只 "
+            print(f"🔍[排查] 环节② 市值过滤(finviz Market Cap列): {before} → {len(final_tickers)} 只 "
                   f"(范围 {MARKET_CAP_MIN}-{MARKET_CAP_MAX}M)")
         else:
             # 兜底: finviz 结果无 Market Cap 列时回退到 yfinance 校验（注意可能被限流）
@@ -225,7 +218,7 @@ def get_finviz_screened_tickers():
                 except Exception as e:
                     skipped += 1
                     print(f"⚠️[排查] {ticker} 市值校验失败: {type(e).__name__}: {e}")
-            print(f"🔍[排查] 环节③ 市值二次校验后: {len(final_tickers)} 只 (失败/跳过 {skipped} 只)")
+            print(f"🔍[排查] 环节② 市值二次校验后: {len(final_tickers)} 只 (失败/跳过 {skipped} 只)")
         return final_tickers
     except Exception as e:
         print(f"❌ finviz初筛接口调用失败: {type(e).__name__}: {e}")

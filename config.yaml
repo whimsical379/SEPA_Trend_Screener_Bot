@@ -7,14 +7,15 @@ filters:
   price_min: 5              # 最低股价
   ma200_rising_days: 43     # MA200持续向上交易日
   ipo_min_year: 1           # 上市最短年限
-  exclude_industries:       # 排除行业
-    - "Banks"
-    - "Insurance"
-    - "Utilities"
-    - "Oil & Gas"
-    - "Steel"
-    - "Shipping"
-    - "Coal"
+  # 行业筛选已移除（v1.5），保留原配置仅作参考
+  # exclude_industries:       # 排除行业
+  #   - "Banks"
+  #   - "Insurance"
+  #   - "Utilities"
+  #   - "Oil & Gas"
+  #   - "Steel"
+  #   - "Shipping"
+  #   - "Coal"
 
 # 周期筛选阈值
 thresholds:

@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
+import time
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -149,29 +150,23 @@ def get_a_share_screened_tickers():
             df_all = df_all[~df_all['名称'].str.contains('ST', case=False, na=False)]
             print(f"🔍[排查] 环节② 排除ST后: {len(df_all)} 只")
         
-        # 排除特定行业
-        if '行业' in df_all.columns and EXCLUDE_INDUSTRIES:
-            exclude_pattern = '|'.join(EXCLUDE_INDUSTRIES)
-            df_all = df_all[~df_all['行业'].str.contains(exclude_pattern, case=False, na=False)]
-            print(f"🔍[排查] 环节③ 排除行业后: {len(df_all)} 只")
-        
         # 市值过滤（单位：亿元）
         if '总市值' in df_all.columns:
             mc_yi = df_all['总市值'] / 1e8  # 转为亿元
             before = len(df_all)
             df_all = df_all[(mc_yi >= MARKET_CAP_MIN) & (mc_yi <= MARKET_CAP_MAX)]
-            print(f"🔍[排查] 环节④ 市值过滤后: {before} → {len(df_all)} 只 (范围 {MARKET_CAP_MIN}-{MARKET_CAP_MAX}亿)")
+            print(f"🔍[排查] 环节③ 市值过滤后: {before} → {len(df_all)} 只 (范围 {MARKET_CAP_MIN}-{MARKET_CAP_MAX}亿)")
         
         # 成交量过滤（成交额 > 1亿元）
         if '成交额' in df_all.columns:
             df_all = df_all[df_all['成交额'] > 1e8]
-            print(f"🔍[排查] 环节⑤ 成交额过滤后: {len(df_all)} 只")
+            print(f"🔍[排查] 环节④ 成交额过滤后: {len(df_all)} 只")
         
         # 股价过滤
         if '最新价' in df_all.columns:
             price_min = 3  # 最低股价
             df_all = df_all[df_all['最新价'] >= price_min]
-            print(f"🔍[排查] 环节⑥ 股价过滤后: {len(df_all)} 只 (最低 {price_min}元)")
+            print(f"🔍[排查] 环节⑤ 股价过滤后: {len(df_all)} 只 (最低 {price_min}元)")
         
         # 提取股票代码
         tickers = df_all['代码'].tolist()
@@ -183,28 +178,18 @@ def get_a_share_screened_tickers():
         return []
 
 # ===================== 数据获取 =====================
-def get_data_a_share(symbol: str, interval='daily'):
-    """获取A股单只K线数据（akshare）"""
+def get_data_a_share(symbol: str, days=730):
+    """获取A股单只日线K线数据（默认2年，可推导周线）"""
     try:
         end_date = datetime.now().strftime('%Y%m%d')
-        
-        if interval == 'weekly':
-            # 周线需要2年数据
-            start_date = (datetime.now() - timedelta(days=730)).strftime('%Y%m%d')
-            period = 'weekly'
-        else:
-            # 日线需要1年数据
-            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
-            period = 'daily'
-        
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
         df = ak.stock_zh_a_hist(
             symbol=symbol,
-            period=period,
+            period='daily',
             start_date=start_date,
             end_date=end_date,
             adjust="qfq"  # 前复权
         )
-        
         if df.empty:
             return df
         
@@ -235,6 +220,67 @@ def get_data_a_share(symbol: str, interval='daily'):
     except Exception as e:
         print(f"⚠️ 获取 {symbol} 数据失败: {type(e).__name__}: {e}")
         return pd.DataFrame()
+
+
+# ===================== 指数数据 / 周线推导 / 并发下载 =====================
+def daily_to_weekly(df_d):
+    """日线重采样为周线（A股周五收盘）"""
+    if df_d is None or df_d.empty or len(df_d) < 52:
+        return pd.DataFrame()
+    return df_d.resample('W-FRI').agg({
+        'Open': 'first', 'High': 'max', 'Low': 'min',
+        'Close': 'last', 'Volume': 'sum'
+    }).dropna()
+
+
+def get_index_data_a_share(symbol="sh000300"):
+    """获取A股指数日线（沪深300）：东财接口优先，新浪兜底"""
+    try:
+        df = ak.stock_zh_index_daily_em(symbol=symbol)
+        if df is None or df.empty:
+            print(f"⚠️ 指数 {symbol} 东财接口为空，回退新浪接口")
+            df = ak.stock_zh_index_daily(symbol=symbol)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.rename(columns={
+            'open': 'Open', 'high': 'High', 'low': 'Low',
+            'close': 'Close', 'volume': 'Volume'
+        })
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+        return df
+    except Exception as e:
+        print(f"⚠️ 获取指数 {symbol} 失败: {type(e).__name__}: {e}")
+        return pd.DataFrame()
+
+
+def download_a_share_batch(tickers, max_workers=8, retries=3):
+    """并发下载候选股票日线（2年），返回 {ticker: daily_df}；失败自动重试"""
+    import concurrent.futures
+    import random
+    result = {}
+    total = len(tickers)
+    done = 0
+
+    def fetch(tk):
+        for attempt in range(retries):
+            try:
+                df = get_data_a_share(tk)
+                if not df.empty:
+                    return tk, df
+            except Exception:
+                pass
+            time.sleep(0.2 * (attempt + 1) + random.random() * 0.3)
+        return tk, pd.DataFrame()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for tk, df in ex.map(fetch, tickers):
+            result[tk] = df
+            done += 1
+            if done % 200 == 0:
+                print(f"  下载进度: {done}/{total}")
+    return result
 
 # ===================== 周线闸门（返回逐条件失败明细） =====================
 def check_weekly_gate(ticker, df_w):
@@ -363,23 +409,32 @@ def run_sepa_bot():
         return
 
     push_content += f"✅ A股初筛完成，共获取到 {len(tickers)} 只候选标的\n\n"
-    spy_df = get_data_a_share(BENCHMARK)
+    spy_df = get_index_data_a_share("sh" + BENCHMARK)
+    if spy_df.empty:
+        print("⚠️ 基准指数(沪深300)数据为空，将导致全部标的'指数对齐失败'")
     buy_signals = []
     near_misses = []  # 差一个条件就能入选
 
-    # 循环筛选（A股暂时不批量下载，逐只获取）
-    print(f"📥 开始逐只获取数据并筛选...")
+    # 并发预下载全部候选日线（2年），周线由日线推导
+    print(f"📥 并发下载 {len(tickers)} 只候选日线数据（8线程）...")
+    daily_data = download_a_share_batch(tickers)
+    print(f"✅ 日线数据就绪：{sum(1 for v in daily_data.values() if not v.empty)}/{len(tickers)} 只")
+
+    # 循环筛选
     for i, ticker in enumerate(tickers):
-        if i % 50 == 0 and i > 0:
-            print(f"  进度: {i}/{len(tickers)}")
-        
+        if i % 200 == 0 and i > 0:
+            print(f"  筛选进度: {i}/{len(tickers)}")
         try:
-            # 周线闸门（逐条件追踪）
-            df_w = get_data_a_share(ticker, interval='weekly')
-            if df_w.empty:
-                print(f"[跳过] {ticker}: 周线数据为空")
+            df_d = daily_data.get(ticker)
+            if df_d is None or df_d.empty:
+                print(f"[跳过] {ticker}: 日线数据缺失")
                 continue
-            
+            # 周线由日线推导
+            df_w = daily_to_weekly(df_d)
+            if df_w.empty:
+                print(f"[跳过] {ticker}: 周线数据不足")
+                continue
+            # 周线闸门（逐条件追踪）
             pass_w, msg_w, failed_w = check_weekly_gate(ticker, df_w)
             if not pass_w:
                 if len(failed_w) == 1:
@@ -387,11 +442,6 @@ def run_sepa_bot():
                 continue
 
             # 日线核心（逐条件追踪）
-            df_d = get_data_a_share(ticker, interval='daily')
-            if df_d.empty:
-                print(f"[跳过] {ticker}: 日线数据为空")
-                continue
-            
             pass_d, msg_d, last_row, failed_d = check_daily_core(ticker, df_d, spy_df)
             if not pass_d:
                 if len(failed_d) == 1:
