@@ -19,44 +19,122 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ===================== finvizfinance 兼容补丁 =====================
-# 修复 finviz.com 2026 年改版引发的 Ticker 重复首字母 bug（finvizfinance issue #158）
-# 新版页面在 ticker 单元格内新增了 logo 首字母 <span>（图片加载失败时的字母回退），
-# 库用 col.get_text() 会把 "A" + "AAOI" 拼成 "AAAOI"，导致后续 yfinance 查询全部失败。
-# 补丁：Ticker 列优先从 <a class="tab-link"> 的 href="stock?t=XXX" 提取真实代码。
+# 修复①（2026-09-30 起生效的 finviz WAF）：
+#   finvizfinance 1.3.0 的 UA 字符串因 Python 换行续行符带有 20 个空格（畸形 UA），
+#   finviz 新 WAF 对其直接返回 403 Forbidden，导致初筛失败、Bot 空转。
+#   补丁：替换为干净的现代浏览器请求头。
+# 修复②（finviz 2026 年中页面改版）：
+#   新版 /screener 改为 SSR island 架构，表格由前端渲染，HTML 中不再存在
+#   <table class="screener_table"> 与 id="pageSelect"，旧 DOM 解析全部失效；
+#   但完整筛选数据以纯 JSON 岛嵌在页面的 <script> 中（"data":{"rows":[...],
+#   "totalCount":N,"pageSize":20}）。补丁：重写 screener_view，改为逐页解析 JSON 岛。
+#   Market Cap 单位沿用旧 number_covert 语义（美元），保持下游市值过滤逻辑不变。
+# 注：原 finvizfinance issue #158 的 Ticker 解析补丁已随 DOM 一起失效，不再需要。
 def _install_finviz_ticker_patch():
-    import re as _re
+    import json as _json
+    from finvizfinance import util as _futil
     from finvizfinance.screener import base as _base
-    from finvizfinance.util import number_covert as _nc
 
-    def _patched_get_table(self, rows, df, num_col_index, table_header, limit=-1):
-        rows = rows[1:]
-        if limit != -1:
-            rows = rows[0:limit]
+    # --- 修复①：浏览器请求头 ---
+    _futil.headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    def _extract_island_json(soup):
+        """从页面 <script> 中提取筛选数据 JSON 岛，失败返回 None"""
+        for s in soup.find_all("script"):
+            txt = s.get_text() or ""
+            if '"rows":[' not in txt:
+                continue
+            start = txt.find("{")
+            try:
+                return _json.loads(txt[start:])
+            except _json.JSONDecodeError:
+                continue
+        return None
+
+    def _rows_to_frame(rows, row_offset=0):
+        """JSON rows → DataFrame（列名与旧版 finvizfinance 对齐，Market Cap 单位=美元）"""
         frame = []
-        for row in rows:
-            cols = row.findAll("td")[1:]
-            info_dict = {}
-            for i, col in enumerate(cols):
-                header = table_header[i] if i < len(table_header) else f"col{i}"
-                if header == "Ticker":
-                    # 修复: 从 href="stock?t=XXX" 提取真实 ticker
-                    a = col.find("a", class_="tab-link") or col.find("a")
-                    if a and a.get("href"):
-                        m = _re.search(r"[?&]t=([^&]+)", a["href"])
-                        if m:
-                            info_dict[header] = m.group(1)
-                            continue
-                    info_dict[header] = col.get_text(strip=True)
-                elif i not in num_col_index:
-                    info_dict[header] = col.text
-                else:
-                    info_dict[header] = _nc(col.text)
-            frame.append(info_dict)
-        if len(df) == 0:
-            return pd.DataFrame(frame)
-        return pd.concat([df, pd.DataFrame(frame)], ignore_index=True)
+        for i, r in enumerate(rows):
+            t = r.get("text", {}) or {}
+            n = r.get("numbers", {}) or {}
+            frame.append({
+                "No.": row_offset + i + 1,
+                "Ticker": t.get("ticker", ""),
+                "Company": t.get("company", ""),
+                "Sector": t.get("sector", ""),
+                "Industry": t.get("industry", ""),
+                "Country": t.get("country", ""),
+                "Market Cap": (n.get("marketCap") or 0) * 1e6,  # JSON单位=百万美元 → 美元
+                "P/E": n.get("PE"),
+                "Price": n.get("price"),
+                "Change": n.get("change"),
+                "Volume": n.get("volume"),
+            })
+        return pd.DataFrame(frame)
 
-    _base.Base._get_table = _patched_get_table
+    def _patched_screener_view(self, order="Ticker", limit=100000, select_page=None,
+                               verbose=1, ascend=True, columns=None, sleep_sec=1):
+        from time import sleep as _sleep
+        from finvizfinance.constants import order_dict
+        from finvizfinance.util import web_scrap as _web_scrap
+
+        if order not in order_dict:
+            order_keys = list(order_dict.keys())
+            raise ValueError(
+                "Invalid order '{}'. Possible order: {}".format(order, order_keys)
+            )
+        self.request_params["o"] = ("" if ascend else "-") + order_dict[order]
+
+        if select_page:
+            self.request_params["r"] = (select_page - 1) * self.size + 1
+            soup = _web_scrap(self.url, self.request_params)
+            data = _extract_island_json(soup)
+            if data is None:
+                print("No ticker found.")
+                return None
+            warnings.warn("Limit parameter is ignored when page is selected.")
+            return _rows_to_frame(data["data"].get("rows", []),
+                                  (select_page - 1) * self.size)
+
+        # 逐页拉取（pageSize=20，r 为 1-based 行偏移）
+        all_rows = []
+        total = None
+        page = 0
+        while True:
+            if page == 0:
+                self.request_params.pop("r", None)
+            else:
+                self.request_params["r"] = page * self.size + 1
+            soup = _web_scrap(self.url, self.request_params)
+            data = _extract_island_json(soup)
+            if data is None:
+                break
+            meta = data.get("data", {})
+            total = meta.get("totalCount", 0)
+            rows = meta.get("rows", [])
+            all_rows.extend(rows)
+            page += 1
+            if verbose == 1 and total:
+                print(f"[info] fetching {min(page * self.size, total)}/{total} rows")
+            if not rows or len(all_rows) >= total:
+                break
+            if limit != -1 and len(all_rows) >= limit:
+                break
+            _sleep(sleep_sec)
+
+        if not all_rows:
+            print("No ticker found.")
+            return None
+        if limit != -1:
+            all_rows = all_rows[:limit]
+        return _rows_to_frame(all_rows)
+
+    _base.Base.screener_view = _patched_screener_view
 
 
 _install_finviz_ticker_patch()
@@ -251,9 +329,10 @@ def download_batch(tickers, interval='1d', batch_size=50):
         batch = tickers[i:i + batch_size]
         idx = i // batch_size + 1
         try:
+            # yfinance 1.6.0 移除了 batch_size 参数，改为按列表传入自行分批
             df = yf.download(batch, period=period, interval=interval,
-                             group_by='ticker', batch_size=batch_size,
-                             progress=False, auto_adjust=True, threads=True)
+                             group_by='ticker', progress=False,
+                             auto_adjust=True, threads=True)
             if df is None or df.empty:
                 print(f"⚠️[批量下载] 第{idx}/{n_batch}批({len(batch)}只)返回为空，跳过")
                 continue
