@@ -184,6 +184,11 @@ SMTP_USER = os.getenv("SMTP_USER", "")   # QQ邮箱地址
 SMTP_PASS = os.getenv("SMTP_PASS", "")   # QQ邮箱授权码（非登录密码）
 SMTP_TO   = os.getenv("SMTP_TO", "")     # 收件人邮箱，多个用逗号分隔
 
+# ===================== 策略版本戳 =====================
+# 随每条信号写入 CSV（StrategyVersion 列）。筛选逻辑发生大改版时必须递增，
+# 便于未来统计时按"策略代际"分组，避免新旧逻辑数据混用导致失真。
+STRATEGY_VERSION = "v1.6"
+
 # ===================== 邮件推送函数 =====================
 def md_to_plain(md_text):
     """简单 Markdown → 纯文本（适配邮件正文）"""
@@ -213,13 +218,115 @@ def md_to_plain(md_text):
     return "\n".join(lines)
 
 
-def send_email_msg(title, content):
-    """SMTP 邮件推送（QQ邮箱，支持多收件人）"""
+# ===================== HTML 邮件模板（v1.6：QQ邮箱支持 HTML，表格布局保证客户端兼容） =====================
+def build_email_html(title, body_html):
+    """邮件外壳：深色标题栏 + 白色内容区，纯内联样式（客户端兼容）"""
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1"></head>'
+        '<body style="margin:0;padding:0;background:#f4f5f7;">'
+        '<div style="max-width:640px;margin:0 auto;padding:16px;'
+        'font-family:-apple-system,\'Segoe UI\',\'Microsoft YaHei\',Arial,sans-serif;">'
+        '<div style="background:#1f2937;border-radius:12px 12px 0 0;padding:18px 24px;">'
+        f'<div style="color:#ffffff;font-size:18px;font-weight:bold;">{title}</div>'
+        f'<div style="color:#9ca3af;font-size:12px;margin-top:4px;">SEPA Trend Screener Bot · {STRATEGY_VERSION}</div>'
+        '</div>'
+        f'<div style="background:#ffffff;border-radius:0 0 12px 12px;padding:20px 24px;">{body_html}</div>'
+        '<p style="color:#9ca3af;font-size:11px;text-align:center;margin-top:12px;">'
+        '本邮件由 SEPA Trend Screener Bot 自动发送 · 仅供研究参考，不构成投资建议</p>'
+        '</div></body></html>'
+    )
+
+
+def stock_card_html(idx, sig):
+    """完整入选标的卡片：代码+公司/行业、三列价格、关键指标"""
+    company = sig.get("Company") or ""
+    sector = sig.get("Sector") or ""
+    sub = f"{company}{' · ' + sector if sector else ''}"
+    metric_line = ""
+    if sig.get("RSI14") is not None:
+        metric_line = (
+            f'RSI14 <b>{sig["RSI14"]}</b> · 乖离MA200 <b>{sig["Bias200"]}</b>'
+            f' · 量比 <b>{sig["VolRatio"]}x</b><br>'
+        )
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border:1px solid #e5e7eb;border-radius:10px;margin-bottom:14px;border-collapse:separate;">'
+        '<tr><td style="padding:12px 16px 4px 16px;">'
+        f'<span style="font-size:20px;font-weight:bold;color:#111827;">#{idx} {sig["ID"]}</span> '
+        f'<span style="font-size:12px;color:#6b7280;">{sub}</span>'
+        '</td></tr>'
+        '<tr><td style="padding:8px 16px 14px 16px;">'
+        '<table width="100%" cellpadding="0" cellspacing="0"><tr>'
+        '<td width="33%" style="text-align:center;background:#f9fafb;border-radius:8px;padding:10px 0;">'
+        '<div style="font-size:11px;color:#6b7280;">触发价</div>'
+        f'<div style="font-size:17px;font-weight:bold;color:#111827;">{sig["Price"]}</div></td>'
+        '<td width="34%" style="text-align:center;background:#fef2f2;border-radius:8px;padding:10px 0;">'
+        '<div style="font-size:11px;color:#6b7280;">止损位</div>'
+        f'<div style="font-size:17px;font-weight:bold;color:#b91c1c;">{sig["SL"]}</div></td>'
+        '<td width="33%" style="text-align:center;background:#ecfdf5;border-radius:8px;padding:10px 0;">'
+        '<div style="font-size:11px;color:#6b7280;">保本位</div>'
+        f'<div style="font-size:17px;font-weight:bold;color:#047857;">{sig["BE"]}</div></td>'
+        '</tr></table>'
+        '<div style="font-size:12px;color:#4b5563;margin-top:10px;line-height:1.6;">'
+        + metric_line +
+        f'<span style="color:#9ca3af;">{sig["Msg"]}</span></div>'
+        '</td></tr></table>'
+    )
+
+
+def heartbeat_body_html(n_candidates, run_time, note=""):
+    """无入选日的极简心跳邮件：证明 Bot 活着"""
+    note_html = f'<p style="font-size:12px;color:#9ca3af;">{note}</p>' if note else ""
+    return (
+        '<p style="font-size:14px;color:#374151;">今日筛选已完成，'
+        '<b>暂无符合全部条件的完整入选标的</b>。</p>'
+        f'<p style="font-size:13px;color:#6b7280;">初筛候选 {n_candidates} 只 · 运行时间 {run_time}（北京时间）</p>'
+        + note_html +
+        '<p style="font-size:12px;color:#9ca3af;">本邮件为活性心跳通知：收到即代表 Bot 运行正常。</p>'
+    )
+
+
+def review_table_html(rows, summary_line):
+    """信号复盘表格：日期/代码/触发价/现价/盈亏/区间高低/状态"""
+    status_color = {"已触止损": "#b91c1c", "已达保本": "#047857", "持有中": "#1d4ed8",
+                    "数据缺失": "#6b7280"}
+    header_cells = "".join(
+        f'<th style="background:#1f2937;color:#ffffff;padding:8px 10px;font-size:12px;text-align:left;">{h}</th>'
+        for h in ["信号日", "代码", "公司", "触发价", "现价", "浮动盈亏", "区间最高", "区间最低", "状态"]
+    )
+    body_rows = ""
+    for r in rows:
+        pnl_color = "#047857" if r["PnL"] > 0 else ("#b91c1c" if r["PnL"] < 0 else "#6b7280")
+        st_color = status_color.get(r["Status"], "#374151")
+        body_rows += (
+            '<tr>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151;">{r["Date"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;font-weight:bold;color:#111827;">{r["ID"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280;">{r["Company"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151;">{r["Price"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151;">{r["Cur"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;font-weight:bold;color:{pnl_color};">{r["PnL_str"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151;">{r["High"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151;">{r["Low"]}</td>'
+            f'<td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;font-weight:bold;color:{st_color};">{r["Status"]}</td>'
+            '</tr>'
+        )
+    return (
+        f'<p style="font-size:13px;color:#374151;">{summary_line}</p>'
+        '<table width="100%" cellpadding="0" cellspacing="0" '
+        'style="border:1px solid #e5e7eb;border-radius:8px;border-collapse:separate;overflow:hidden;">'
+        f'<tr>{header_cells}</tr>{body_rows}</table>'
+    )
+
+
+def send_email_msg(title, content, html=False):
+    """SMTP 邮件推送（QQ邮箱，支持多收件人；html=True 时正文为 HTML）"""
     to_list = [x.strip() for x in SMTP_TO.split(",") if x.strip()]
     if not (SMTP_USER and SMTP_PASS and to_list):
         print("⚠️ 未配置SMTP参数(SMTP_USER/SMTP_PASS/SMTP_TO)，跳过邮件推送")
         return False
-    msg = MIMEText(content, "plain", "utf-8")
+    msg = MIMEText(content, "html" if html else "plain", "utf-8")
     # 注意: From/To 必须保持明文邮箱地址（勿用 Header 编码，否则 QQ 邮箱 550 拒收）
     msg["From"] = formataddr(("SEPA Bot", SMTP_USER))
     msg["To"] = ", ".join(to_list)
@@ -248,7 +355,9 @@ def is_us_trading_day():
 
 # ===================== 初筛函数 =====================
 def get_finviz_screened_tickers():
-    """finviz自动初筛 + 市值二次校验"""
+    """finviz自动初筛 + 市值二次校验
+    返回: (tickers列表, finviz原始DataFrame) —— DataFrame 含 Company/Sector，供邮件展示
+    """
     try:
         f_screener = Overview()
         filters_dict = {
@@ -265,7 +374,7 @@ def get_finviz_screened_tickers():
         # [排查打点] 环节①：finviz 原始返回
         if df_res is None or df_res.empty:
             print("❌[排查] 环节① finviz 返回空/None: df_res =", df_res)
-            return []
+            return [], None
         print(f"🔍[排查] 环节① finviz 原始返回: {len(df_res)} 只 | 列名: {list(df_res.columns)}")
 
         initial_tickers = df_res['Ticker'].tolist()
@@ -297,10 +406,10 @@ def get_finviz_screened_tickers():
                     skipped += 1
                     print(f"⚠️[排查] {ticker} 市值校验失败: {type(e).__name__}: {e}")
             print(f"🔍[排查] 环节② 市值二次校验后: {len(final_tickers)} 只 (失败/跳过 {skipped} 只)")
-        return final_tickers
+        return final_tickers, df_res
     except Exception as e:
         print(f"❌ finviz初筛接口调用失败: {type(e).__name__}: {e}")
-        return []
+        return [], None
 
 # ===================== 数据获取 =====================
 def get_data(symbol: str, interval='1d'):
@@ -452,34 +561,171 @@ def check_daily_core(ticker, df, spy_df):
 
     return True, "日线通过", t, []
 
+# ===================== 非交易日信号绩效复盘（v1.6 新增） =====================
+def _get_recent_sessions(n=5):
+    """获取最近 n 个美股交易日日期（不含今天），返回 ['YYYY-MM-DD', ...]"""
+    import exchange_calendars as xcals
+    cal = xcals.get_calendar("XNYS")
+    ny_today = datetime.now(ZoneInfo("America/New_York")).date()
+    sessions = cal.sessions_in_range(ny_today - timedelta(days=n * 3 + 7), ny_today - timedelta(days=1))
+    return [s.strftime('%Y-%m-%d') for s in sessions][-n:]
+
+
+def run_signal_review(lookback=5):
+    """非交易日运行：读取信号 CSV 中最近 n 个交易日的入选信号，
+    拉取行情统计后续表现（浮动盈亏 / 是否触止损或保本），发送复盘邮件。
+    """
+    print(f"===== 非交易日：执行近{lookback}个交易日信号复盘 =====")
+    date_str = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+
+    # --- 读取信号 CSV（仅 v1.6 新 schema；缺失或无数据则发心跳） ---
+    csv_file = 'sepa_history_signals.csv'
+    if not os.path.exists(csv_file):
+        print("⚠️ 信号 CSV 不存在，跳过复盘")
+        subject = f"📊 SEPA信号复盘 {date_str[5:]} | 暂无信号数据"
+        body = heartbeat_body_html(0, datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S'),
+                                   note="新版本信号库尚未积累数据，复盘功能将在产生入选信号后自动生效。")
+        send_email_msg(subject, build_email_html(subject, body), html=True)
+        return
+
+    try:
+        df_sig = pd.read_csv(csv_file)
+    except Exception as e:
+        print(f"⚠️ 信号 CSV 读取失败: {type(e).__name__}: {e}，跳过复盘")
+        return
+
+    required_cols = {'Date', 'ID', 'Price', 'SL', 'BE'}
+    if df_sig.empty or not required_cols.issubset(df_sig.columns):
+        print("⚠️ 信号 CSV 为空或缺少必需列，跳过复盘")
+        subject = f"📊 SEPA信号复盘 {date_str[5:]} | 暂无信号数据"
+        body = heartbeat_body_html(0, date_str, note="信号库暂无可复盘的数据。")
+        send_email_msg(subject, build_email_html(subject, body), html=True)
+        return
+
+    # --- 最近 n 个交易日窗口 ---
+    try:
+        window = _get_recent_sessions(lookback)
+    except Exception as e:
+        print(f"⚠️ 交易日历获取失败({type(e).__name__}: {e})，回退按自然日窗口")
+        d1 = (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=lookback * 2 + 2)).strftime('%Y-%m-%d')
+        d2 = (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)).strftime('%Y-%m-%d')
+        window = [d1, d2]
+
+    sig = df_sig[df_sig['Date'].astype(str).isin(window)].copy()
+    print(f"📅 复盘窗口: {window[0]} ~ {window[-1]} | 命中信号 {len(sig)} 条")
+
+    if sig.empty:
+        subject = f"📊 SEPA信号复盘 {date_str[5:]} | 近5个交易日无入选"
+        body = heartbeat_body_html(0, date_str, note=f"复盘窗口 {window[0]} ~ {window[-1]} 内无入选信号，Bot 运行正常。")
+        send_email_msg(subject, build_email_html(subject, body), html=True)
+        return
+
+    # --- 拉取信号标的行情并逐条统计 ---
+    tickers = sig['ID'].astype(str).unique().tolist()
+    try:
+        data = yf.download(tickers, start=window[0], interval='1d',
+                           group_by='ticker', progress=False, auto_adjust=True, threads=True)
+    except Exception as e:
+        print(f"❌ 复盘行情下载失败: {type(e).__name__}: {e}")
+        data = None
+
+    rows = []
+    n_stop = n_be = n_hold = n_miss = 0
+    for _, r in sig.iterrows():
+        try:
+            tk = str(r['ID'])
+            sub = None
+            if data is not None and not data.empty:
+                try:
+                    sub = data[tk].dropna()
+                except Exception:
+                    # 单标的返回可能是单层列索引
+                    if tk in (data.columns.get_level_values(0) if isinstance(data.columns, pd.MultiIndex) else []):
+                        sub = data.dropna()
+            if sub is None or sub.empty:
+                rows.append({"Date": r['Date'], "ID": tk, "Company": r.get('Company', ''),
+                             "Price": r['Price'], "Cur": "-", "PnL": 0, "PnL_str": "-",
+                             "High": "-", "Low": "-", "Status": "数据缺失"})
+                n_miss += 1
+                continue
+
+            sub = sub.loc[str(r['Date']):]
+            if sub.empty:
+                rows.append({"Date": r['Date'], "ID": tk, "Company": r.get('Company', ''),
+                             "Price": r['Price'], "Cur": "-", "PnL": 0, "PnL_str": "-",
+                             "High": "-", "Low": "-", "Status": "数据缺失"})
+                n_miss += 1
+                continue
+
+            price, sl, be = float(r['Price']), float(r['SL']), float(r['BE'])
+            cur = float(sub['Close'].iloc[-1])
+            high = float(sub['High'].max())
+            low = float(sub['Low'].min())
+            pnl = cur / price - 1
+
+            if low <= sl:
+                status = "已触止损"; n_stop += 1
+            elif high >= be:
+                status = "已达保本"; n_be += 1
+            else:
+                status = "持有中"; n_hold += 1
+
+            rows.append({"Date": r['Date'], "ID": tk, "Company": r.get('Company', ''),
+                         "Price": price, "Cur": round(cur, 2), "PnL": pnl,
+                         "PnL_str": f"{pnl:+.1%}", "High": round(high, 2),
+                         "Low": round(low, 2), "Status": status})
+        except Exception as e:
+            print(f"⚠️ 复盘 {r.get('ID', '?')} 出错: {type(e).__name__}: {e}")
+            n_miss += 1
+
+    # --- 输出与推送 ---
+    print("\n" + "=" * 15 + f" 📊 近{lookback}个交易日信号复盘 " + "=" * 15)
+    for row in rows:
+        print(f"  {row['Date']} {row['ID']:<6} 触发{row['Price']} → 现价{row['Cur']} "
+              f"{row['PnL_str']} | {row['Status']}")
+
+    summary = (f"复盘窗口 {window[0]} ~ {window[-1]}，共 {len(rows)} 条信号："
+               f"✅持有中 {n_hold} · 🔒已达保本 {n_be} · 🛑已触止损 {n_stop}"
+               + (f" · ⚠️数据缺失 {n_miss}" if n_miss else ""))
+    subject = f"📊 SEPA信号复盘 {date_str[5:]} | {len(rows)}条信号"
+    body = review_table_html(rows, summary)
+    send_email_msg(subject, build_email_html(subject, body), html=True)
+
+
 # ===================== 主运行函数 =====================
 def run_sepa_bot():
     tz_utc_8 = timezone(timedelta(hours=8))
     run_time = datetime.now(tz_utc_8).strftime('%Y-%m-%d %H:%M:%S')
     print(f"===== SEPA策略运行时间：{run_time} =====")
 
-    # ===== 非交易日跳过 =====
+    # ===== 非交易日：近5个交易日信号绩效复盘（v1.6） =====
     if not is_us_trading_day():
-        msg = (f"## SEPA策略今日休市\n\n"
-               f"- 运行时间：{run_time}（北京时间）\n"
-               f"- 原因：美股今日非交易日\n"
-               f"- 结果：今日不进行筛选，明日自动恢复正常运行。")
-        print(msg)
-        send_email_msg("📭 SEPA策略：今日美股休市", md_to_plain(msg))
+        run_signal_review()
         return
 
-    push_content = f"## SEPA策略运行时间：{run_time}\n\n"
-    tickers = get_finviz_screened_tickers()
+    date_str = run_time[5:10]  # MM-DD，用于邮件标题
+
+    tickers, screener_df = get_finviz_screened_tickers()
 
     if not tickers:
-        push_content += "❌ finviz初筛无符合条件的标的，请检查参数"
-        print(push_content)
-        send_email_msg("🔴 SEPA策略每日运行结果", md_to_plain(push_content))
+        subject = f"📉 SEPA美股筛选 {date_str} | 初筛无结果"
+        print("❌ finviz初筛无符合条件的标的，已发送心跳通知")
+        send_email_msg(subject, build_email_html(subject, heartbeat_body_html(0, run_time,
+                       note="finviz 初筛无符合条件的标的或调用失败，请检查运行日志。")), html=True)
         return
 
-    push_content += f"✅ finviz初筛完成，共获取到 {len(tickers)} 只候选标的\n\n"
+    n_candidates = len(tickers)
+    print(f"✅ finviz初筛完成，共获取到 {n_candidates} 只候选标的")
+    company_map, sector_map = {}, {}
+    if screener_df is not None and 'Company' in screener_df.columns:
+        company_map = dict(zip(screener_df['Ticker'].astype(str),
+                               screener_df['Company'].astype(str)))
+    if screener_df is not None and 'Sector' in screener_df.columns:
+        sector_map = dict(zip(screener_df['Ticker'].astype(str),
+                              screener_df['Sector'].astype(str)))
+
     buy_signals = []
-    near_misses = []  # 差一个条件就能入选
+    near_misses = []  # 差一个条件就能入选（仅控制台记录，不再进邮件）
 
     # ===== 批量下载（周线/日线各一次，替代逐只请求）=====
     print("📥 批量下载周线数据（2y）...")
@@ -515,14 +761,23 @@ def run_sepa_bot():
                     near_misses.append({"ID": ticker, "Level": "日线", "Reason": failed_d[0]})
                 continue
 
-            # 完全通过
+            # 完全通过（附带当时的关键指标数值，供日后复盘"当时为什么选它"）
             p = last_row['Close']
             buy_signals.append({
                 "ID": ticker,
+                "Company": company_map.get(ticker, ""),
+                "Sector": sector_map.get(ticker, ""),
                 "Price": round(p, 2),
                 "SL": round(p * (1 - STOP_LOSS_PCT), 2),
                 "BE": round(p * (1 + BREAK_EVEN_PCT), 2),
-                "Msg": f"{msg_w} | {msg_d}"
+                "MA50": round(last_row['MA50'], 2),
+                "MA150": round(last_row['MA150'], 2),
+                "MA200": round(last_row['MA200'], 2),
+                "RSI14": round(last_row['RSI14'], 1),
+                "Bias200": round(p / last_row['MA200'], 3),
+                "VolRatio": round(last_row['Volume'] / last_row['VOL_MA20'], 2),
+                "Msg": f"{msg_w} | {msg_d}",
+                "StrategyVersion": STRATEGY_VERSION,
             })
         except Exception as e:
             print(f"[跳过] {ticker}: 数据处理出错 {e}")
@@ -531,52 +786,38 @@ def run_sepa_bot():
     # ===================== 输出结果 =====================
     print("\n" + "=" * 15 + " 🔴 三周期SEPA明日入场推荐 " + "=" * 15)
 
-    # --- 完整入选标的 ---
+    # --- 完整入选标的（邮件只推完整标的，v1.6） ---
     if not buy_signals:
-        push_content += "### 最终结果：暂无符合三周期SEPA标准的标的\n"
         print("→ 暂无符合标的")
+        subject = f"📉 SEPA美股筛选 {date_str} | 今日无入选"
+        body = heartbeat_body_html(n_candidates, run_time)
     else:
-        push_content += f"### 完整入选标的（共{len(buy_signals)}只，展示前{MAX_POSITIONS}只）：\n\n"
         for i in buy_signals[:MAX_POSITIONS]:
             print(f"• {i['ID']} | 触发价: {i['Price']} | 7%止损: {i['SL']} | 14%保本位: {i['BE']}")
             print(f"  └─ 状态: {i['Msg']}")
-            push_content += (
-                f"#### {i['ID']}\n"
-                f"- 触发价：{i['Price']} 美元\n"
-                f"- 7%止损位：{i['SL']} 美元\n"
-                f"- 14%保本位：{i['BE']} 美元\n"
-                f"- 周期验证：{i['Msg']}\n\n"
-            )
+        subject = f"📈 SEPA美股筛选 {date_str} | 入选 {min(len(buy_signals), MAX_POSITIONS)} 只"
+        body = "".join(stock_card_html(k, s) for k, s in enumerate(buy_signals[:MAX_POSITIONS], 1))
+        body += (f'<p style="font-size:12px;color:#9ca3af;margin-top:8px;">'
+                 f'初筛候选 {n_candidates} 只 · 运行时间 {run_time}（北京时间）</p>')
 
-    # --- 差一步标的 ---
+    # --- 差一步标的（仅控制台记录） ---
     if near_misses:
-        # 最多展示15只，避免微信推送超长
-        show_count = min(len(near_misses), 15)
-        push_content += f"### 差一步就入选（共{len(near_misses)}只，展示{show_count}只）：\n\n"
-        print(f"\n--- 差一步就入选（共{len(near_misses)}只）---")
-
-        # 按层级排序：日线优先（更接近入选）
+        print(f"\n--- 差一步就入选（共{len(near_misses)}只，仅控制台记录）---")
         near_misses.sort(key=lambda x: (0 if x['Level'] == '日线' else 1, x['ID']))
-
-        push_content += "| 代码 | 关卡 | 差的条件 |\n"
-        push_content += "|:---|:---|:---|\n"
-        for nm in near_misses[:show_count]:
-            reason_short = nm['Reason'][:60] + ("..." if len(nm['Reason']) > 60 else "")
+        for nm in near_misses:
             print(f"  ⚡ {nm['ID']} | {nm['Level']} | {nm['Reason']}")
-            push_content += f"| {nm['ID']} | {nm['Level']} | {reason_short} |\n"
-        push_content += "\n"
 
-    # --- CSV 持久化 ---
+    # --- CSV 持久化（v1.6 新 schema：带版本戳与关键指标） ---
     if buy_signals:
         df_to_save = pd.DataFrame(buy_signals[:MAX_POSITIONS])
         df_to_save['Date'] = datetime.now(tz_utc_8).strftime('%Y-%m-%d')
         csv_file = 'sepa_history_signals.csv'
         header = not os.path.exists(csv_file)
         df_to_save.to_csv(csv_file, mode='a', index=False, header=header, encoding='utf-8-sig')
-        print(f"💾 已将 {len(df_to_save)} 条信号保存至 {csv_file}")
+        print(f"💾 已将 {len(df_to_save)} 条信号保存至 {csv_file} (StrategyVersion={STRATEGY_VERSION})")
 
-    # 最终推送
-    send_email_msg("🔴 SEPA策略每日运行结果", md_to_plain(push_content))
+    # 最终推送（HTML 邮件：完整标的 / 心跳）
+    send_email_msg(subject, build_email_html(subject, body), html=True)
 
 if __name__ == '__main__':
     run_sepa_bot()
